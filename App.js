@@ -1,5 +1,6 @@
 import "react-native-gesture-handler";
 import React, { useEffect, useState } from "react";
+import { isRunningInExpoGo } from "expo";
 import {
   Alert,
   ScrollView,
@@ -7,22 +8,43 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  Platform,
   View,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { NavigationContainer } from "@react-navigation/native";
 import { createDrawerNavigator } from "@react-navigation/drawer";
-import * as Notifications from "expo-notifications";
 
 const Drawer = createDrawerNavigator();
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
+const isAndroidExpoGo = Platform.OS === "android" && isRunningInExpoGo();
+let notificationsModulePromise = null;
+
+async function loadNotificationsModule() {
+  if (isAndroidExpoGo) {
+    return null;
+  }
+
+  if (!notificationsModulePromise) {
+    notificationsModulePromise = import("expo-notifications").then(
+      (module) => {
+        const Notifications = module.default ?? module;
+
+        Notifications.setNotificationHandler({
+          handleNotification: async () => ({
+            shouldShowAlert: true,
+            shouldPlaySound: true,
+            shouldSetBadge: false,
+          }),
+        });
+
+        return Notifications;
+      },
+    );
+  }
+
+  return notificationsModulePromise;
+}
 
 const prepIdeas = [
   {
@@ -284,6 +306,7 @@ function ReminderScreen({
   reminderError,
   addReminder,
   removeReminder,
+  notificationsEnabled,
 }) {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -292,6 +315,12 @@ function ReminderScreen({
         <Text style={styles.bodyText}>
           Schedule a reminder for meal prep. Example: remind me in 30 minutes.
         </Text>
+        {!notificationsEnabled ? (
+          <Text style={styles.warningText}>
+            Notifications are unavailable in Android Expo Go. Use a
+            development build to schedule reminders on Android.
+          </Text>
+        ) : null}
 
         <TextInput
           style={styles.input}
@@ -312,7 +341,11 @@ function ReminderScreen({
           <Text style={styles.errorText}>{reminderError}</Text>
         ) : null}
 
-        <TouchableOpacity style={styles.button} onPress={addReminder}>
+        <TouchableOpacity
+          style={[styles.button, !notificationsEnabled && styles.disabledButton]}
+          onPress={addReminder}
+          disabled={!notificationsEnabled}
+        >
           <Text style={styles.buttonText}>Schedule Reminder</Text>
         </TouchableOpacity>
       </View>
@@ -400,25 +433,47 @@ export default function App() {
   const [groceryError, setGroceryError] = useState("");
   const [shoppingError, setShoppingError] = useState("");
   const [recipeError, setRecipeError] = useState("");
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    !isAndroidExpoGo,
+  );
 
   useEffect(() => {
     loadSavedData();
     showRandomPrepIdea();
-    requestNotificationPermission();
+    initializeNotifications();
   }, []);
 
   useEffect(() => {
     saveData();
   }, [groceries, shoppingItems, recipes, reminders]);
 
-  async function requestNotificationPermission() {
-    const { status } = await Notifications.requestPermissionsAsync();
+  async function initializeNotifications() {
+    try {
+      const Notifications = await loadNotificationsModule();
 
-    if (status !== "granted") {
-      Alert.alert(
-        "Notifications Disabled",
-        "Enable notifications to receive meal prep reminders.",
-      );
+      if (!Notifications) {
+        setNotificationsEnabled(false);
+        return;
+      }
+
+      const { status } = await Notifications.getPermissionsAsync();
+
+      if (status !== "granted") {
+        const permissionResult = await Notifications.requestPermissionsAsync();
+        if (permissionResult.status !== "granted") {
+          Alert.alert(
+            "Notifications Disabled",
+            "Enable notifications to receive meal prep reminders.",
+          );
+          setNotificationsEnabled(false);
+          return;
+        }
+      }
+
+      setNotificationsEnabled(true);
+    } catch (error) {
+      console.log("Error initializing notifications:", error);
+      setNotificationsEnabled(false);
     }
   }
 
@@ -580,15 +635,34 @@ export default function App() {
       return;
     }
 
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: "MePrep Reminder 🍴",
-        body: title,
-      },
-      trigger: {
-        seconds: minutes * 60,
-      },
-    });
+    try {
+      const Notifications = await loadNotificationsModule();
+
+      if (!Notifications) {
+        Alert.alert(
+          "Reminder Unavailable",
+          "Android Expo Go cannot schedule reminders. Use a development build to enable notifications.",
+        );
+        return;
+      }
+
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: "MePrep Reminder 🍴",
+          body: title,
+        },
+        trigger: {
+          seconds: minutes * 60,
+        },
+      });
+    } catch (error) {
+      console.log("Error scheduling reminder:", error);
+      Alert.alert(
+        "Reminder Unavailable",
+        "Unable to schedule this reminder right now.",
+      );
+      return;
+    }
 
     setReminders([...reminders, { title, minutes }]);
     setReminderTitle("");
@@ -691,6 +765,7 @@ export default function App() {
               reminderError={reminderError}
               addReminder={addReminder}
               removeReminder={removeReminder}
+              notificationsEnabled={notificationsEnabled}
             />
           )}
         </Drawer.Screen>
@@ -811,6 +886,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 18,
     borderRadius: 14,
+  },
+  disabledButton: {
+    opacity: 0.5,
   },
   micButton: {
     backgroundColor: "#F4A261",
